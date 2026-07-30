@@ -123,8 +123,9 @@ first match wins; **requests matching no rule are refused**.
 | `backend` | `kv` | `kv` (KV v2 engine) or `raw` (verbatim API path read) |
 | `mount` | `kv` | KV engine mount point; must not be set with `backend = "raw"` |
 | `path` | required | Secret path below the mount, or the full API path for `raw` |
-| `format` | `field` | `field` serves one field verbatim; `json` serves all data as JSON |
-| `field` | `{credential}` | Which field of the secret data to serve; must not be set with `format = "json"` |
+| `format` | `field` | `field` serves one field verbatim; `json` serves all data as JSON; `template` renders a Go template over it |
+| `field` | `{credential}` | Which field of the secret data to serve; only with `format = "field"` |
+| `template` | required for `template` | Go template rendered over the secret data; only with `format = "template"` |
 
 The `kv` backend only supports KV v2. A KV v1 mount can still be read through
 `backend = "raw"` with the full API path.
@@ -193,6 +194,41 @@ format = "json"
 The daemon only ever issues a read, so a path that needs a write (PKI issuance,
 transit) does not work, and it does not track the leases those reads create;
 each one expires on its own.
+
+`format = "template"` puts literal text around the secret, which neither `field`
+nor `json` can do. The template is a [Go
+template](https://pkg.go.dev/text/template) executed over the secret data, so a
+field is referenced as `{{ .fieldname }}`:
+
+```toml
+[[credentials]]
+unit = "myapp.service"
+credential = "dsn"
+backend = "raw"
+path = "database/creds/myapp"
+format = "template"
+template = "postgres://{{ .username }}:{{ .password }}@db.example:5432/appdb?sslmode=require"
+```
+
+The two shapes this is for are DSNs like the one above and environment files,
+where every variable needs its `KEY=` prefix. Note that a credential cannot be
+consumed as an `EnvironmentFile=` directly -- systemd loads environment files
+before it sets credentials up -- so an environment payload is read by a service
+wrapper that sources `$CREDENTIALS_DIRECTORY/<id>` and re-execs.
+
+Details:
+
+- The template is compiled when the configuration is loaded, so a malformed one
+  fails startup rather than a credential request.
+- Referencing a field the secret does not have is an error. Go templates would
+  otherwise render `<no value>`, which for a secret payload fails silently.
+- One function is available, `base64Decode`, for conventions that store binary
+  secrets as plain base64 in a string field (the `base64:` prefix that `format =
+  "field"` recognizes is not applied here).
+- The request placeholders above are lookup-side only: they are substituted into
+  `path`, `field` and `mount`, and deliberately not into the template. They vary
+  per request, which cannot be reconciled with compiling once at load time, and
+  the cases this format is for are constant per rule.
 
 ### `[server]`
 

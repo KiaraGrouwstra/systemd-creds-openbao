@@ -3,11 +3,13 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"maps"
 	"path"
 	"slices"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -29,8 +31,9 @@ const (
 
 // Output formats for a credential rule.
 const (
-	FormatField = "field" // a single field of the secret, verbatim
-	FormatJSON  = "json"  // the whole secret data, JSON-encoded
+	FormatField    = "field"    // a single field of the secret, verbatim
+	FormatJSON     = "json"     // the whole secret data, JSON-encoded
+	FormatTemplate = "template" // a Go template rendered over the secret data
 )
 
 // Config is the root of the configuration file.
@@ -200,11 +203,51 @@ type Credential struct {
 	// backend = "raw". Required.
 	Path string `toml:"path"`
 
-	// Format is "field" (default) or "json".
+	// Format is "field" (default), "json", or "template".
 	Format string `toml:"format"`
 	// Field is the key of the secret data to serve when Format is "field".
 	// Default: "{credential}".
 	Field string `toml:"field"`
+	// Template is the Go template rendered over the secret data when
+	// Format is "template". Required for that format, rejected for the
+	// others. See ParsedTemplate for what it may reference.
+	Template string `toml:"template"`
+
+	// parsed holds Template compiled at config load time, so a malformed
+	// template fails startup rather than the first credential request.
+	parsed *template.Template
+}
+
+// ParsedTemplate returns the compiled Template, or nil when Format is not
+// "template". It is executed over the secret data map, so a field is
+// referenced as {{ .fieldname }}. Missing fields are an error rather than
+// the "<no value>" text/template would otherwise substitute, which for a
+// secret payload would fail silently.
+//
+// One function is available: base64Decode, named after the bao agent
+// template function of the same behavior, for conventions that store
+// binary secrets as base64 in a string field.
+//
+// Request placeholders ({unit} and friends) are deliberately not expanded
+// in the payload: they are substituted per request, which cannot be
+// reconciled with compiling the template once at load time, and the cases
+// that motivate this format (environment-variable names, DSN scaffolding)
+// are constant per rule.
+func (r *Credential) ParsedTemplate() *template.Template { return r.parsed }
+
+// templateFuncs are the functions a credential template may call.
+var templateFuncs = template.FuncMap{
+	"base64Decode": func(v any) (string, error) {
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("base64Decode: want a string, got %T", v)
+		}
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+		if err != nil {
+			return "", fmt.Errorf("base64Decode: %w", err)
+		}
+		return string(data), nil
+	},
 }
 
 // SecretRef names one secret to read. Package secrets builds it from a rule and
@@ -438,12 +481,35 @@ func (r *Credential) validate() error {
 
 	switch r.Format {
 	case FormatField:
+		if r.Template != "" {
+			return fmt.Errorf("template must not be set with format = %q", FormatField)
+		}
 	case FormatJSON:
 		if r.Field != "" {
 			return fmt.Errorf("field must not be set with format = %q", FormatJSON)
 		}
+		if r.Template != "" {
+			return fmt.Errorf("template must not be set with format = %q", FormatJSON)
+		}
+	case FormatTemplate:
+		if r.Field != "" {
+			return fmt.Errorf("field must not be set with format = %q", FormatTemplate)
+		}
+		if r.Template == "" {
+			return fmt.Errorf("template is required with format = %q", FormatTemplate)
+		}
+		// Compiled here rather than on first use so a malformed
+		// template is a startup failure, like every other config error.
+		t, err := template.New("credential").
+			Funcs(templateFuncs).
+			Option("missingkey=error").
+			Parse(r.Template)
+		if err != nil {
+			return fmt.Errorf("template: %w", err)
+		}
+		r.parsed = t
 	default:
-		return fmt.Errorf("unknown format %q (expected %q or %q)", r.Format, FormatField, FormatJSON)
+		return fmt.Errorf("unknown format %q (expected %q, %q, or %q)", r.Format, FormatField, FormatJSON, FormatTemplate)
 	}
 	return nil
 }

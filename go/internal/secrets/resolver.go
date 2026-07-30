@@ -3,6 +3,7 @@
 package secrets
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -58,12 +59,22 @@ func (r *Resolver) Resolve(ctx context.Context, req credserver.Request) ([]byte,
 		return nil, "", fmt.Errorf("reading %q: %w", location, err)
 	}
 
-	if rule.Format == config.FormatJSON {
+	switch rule.Format {
+	case config.FormatJSON:
 		out, err := json.Marshal(data)
 		if err != nil {
 			return nil, "", fmt.Errorf("encoding secret %q as JSON: %w", location, err)
 		}
 		return out, location, nil
+	case config.FormatTemplate:
+		// The template is compiled at config load time, so the failures
+		// left here are execution ones: a field the secret does not
+		// have, or a function rejecting its argument.
+		var buf bytes.Buffer
+		if err := rule.ParsedTemplate().Execute(&buf, data); err != nil {
+			return nil, "", fmt.Errorf("rendering template for secret %q: %w", location, err)
+		}
+		return buf.Bytes(), location, nil
 	}
 
 	field := expand.Replace(rule.Field)

@@ -214,6 +214,38 @@ func TestParseErrors(t *testing.T) {
 			want: "field must not be set",
 		},
 		{
+			name: "json format with template",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"json\"\ntemplate = \"x\"",
+			want: "template must not be set",
+		},
+		{
+			name: "field format with template",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\ntemplate = \"x\"",
+			want: "template must not be set",
+		},
+		{
+			name: "template format without template",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"template\"",
+			want: "template is required",
+		},
+		{
+			name: "template format with field",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"template\"\ntemplate = \"x\"\nfield = \"f\"",
+			want: "field must not be set",
+		},
+		{
+			// Compiled at load time, so a malformed template is a
+			// startup failure rather than a failed credential request.
+			name: "malformed template",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"template\"\ntemplate = \"{{ .oops\"",
+			want: "template:",
+		},
+		{
+			name: "unknown format",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"yaml\"",
+			want: "unknown format",
+		},
+		{
 			name: "bad unit glob",
 			toml: "[[credentials]]\nunit = \"[oops\"\npath = \"p\"",
 			want: "invalid glob",
