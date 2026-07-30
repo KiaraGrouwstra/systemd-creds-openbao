@@ -2,6 +2,18 @@
 let
   certs = import "${pkgs.path}/nixos/tests/common/acme/server/snakeoil-certs.nix";
   inherit (certs) domain;
+
+  # A credential cannot be named in EnvironmentFile=: systemd loads
+  # environment files before it sets credentials up. So a unit that wants
+  # its environment from a credential sources it itself, which is what
+  # makes format = "template" useful -- the payload has to already be
+  # KEY=value lines.
+  envProbe = pkgs.writeShellScript "env-probe" ''
+    set -a
+    . "$CREDENTIALS_DIRECTORY/env"
+    set +a
+    printf '%s' "$FALLBACK/$DECODED"
+  '';
 in
 {
   name = "systemd-creds-openbao";
@@ -15,6 +27,10 @@ in
     }:
     {
       security.pki.certificateFiles = [ certs.ca.cert ];
+
+      # Run by the test script through systemd-run; nothing in the system
+      # closure references it otherwise.
+      system.extraDependencies = [ envProbe ];
 
       networking.extraHosts = ''
         127.0.0.1 ${domain}
@@ -79,6 +95,18 @@ in
               path = "kv/data/systemd/creds-test";
               field = "data";
             }
+            # An environment-file payload: literal text around two
+            # values, one of them stored as plain base64.
+            {
+              unit = "creds-test.service";
+              credential = "env";
+              path = "systemd/{unit_name}";
+              format = "template";
+              template = ''
+                FALLBACK={{ .fallback }}
+                DECODED={{ base64Decode .b64 }}
+              '';
+            }
             {
               unit = "creds-test.service";
               path = "systemd/{unit_name}";
@@ -120,8 +148,13 @@ in
       SOCKET = "${nodes.machine.services.systemd-creds-openbao.socketPath}"
       METRICS = "${nodes.machine.services.prometheus.listenAddress}:${toString nodes.machine.services.prometheus.port}/metrics"
 
+      ENV_PROBE = "${envProbe}"
+
       binary_secret = bytes(range(256))
       binary_b64 = base64.b64encode(binary_secret).decode()
+      # Plain base64, without the "base64:" prefix that format = "field"
+      # recognizes: what a template's base64Decode is for.
+      decoded_b64 = base64.b64encode(b"decoded-value").decode()
 
 
       def web_yml(password_hash):
@@ -160,7 +193,8 @@ in
           machine.succeed("bao secrets enable -version=2 kv")
           machine.succeed(f"bao kv put -mount=kv systemd/prometheus 'web.yml={web_yml(bcrypt('password1'))}'")
           machine.succeed(
-              f"bao kv put -mount=kv systemd/creds-test 'binary=base64:{binary_b64}' fallback=fallback-value"
+              f"bao kv put -mount=kv systemd/creds-test 'binary=base64:{binary_b64}' "
+              f"fallback=fallback-value b64={decoded_b64}"
           )
 
       with subtest("Prometheus starts with basic auth served from OpenBao"):
@@ -184,13 +218,25 @@ in
           t.assertEqual(machine.succeed("base64 -w0 /tmp/creds/binary").strip(), binary_b64)
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds/json")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value", "b64": decoded_b64},
           )
           # The raw rule's "data" field is a map, so it is served JSON-encoded.
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds/raw")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value", "b64": decoded_b64},
           )
+
+      with subtest("The template format wraps the secret in literal text"):
+          # The payload is assembled from two fields plus the KEY= prefixes
+          # neither the field nor the json format can produce, and is used
+          # the way an environment payload has to be: sourced by the unit.
+          # Same unit name as above: the rule is scoped to creds-test.service,
+          # and --collect freed the name when that run exited.
+          out = machine.succeed(
+              f"systemd-run --collect --pipe --wait --unit=creds-test -p LoadCredential=env:{SOCKET} "
+              f"{ENV_PROBE}"
+          ).strip()
+          t.assertEqual(out, "fallback-value/decoded-value")
 
       with subtest("Requests matching no rule are refused with an empty credential"):
           size = machine.succeed(
@@ -209,11 +255,12 @@ in
           )
           machine.succeed("journalctl -u systemd-creds-openbao --grep 'configuration reloaded'")
           # The counters cover every request so far: prometheus's start and
-          # reload, the three creds-test fetches, and the denied request.
+          # reload, the three creds-test fetches, the template-rendered env
+          # payload, and the denied request.
           t.assertEqual(
               machine.succeed("systemctl show -p StatusText --value systemd-creds-openbao.service").strip(),
               "serving ${toString (builtins.length nodes.machine.services.systemd-creds-openbao.settings.credentials)}"
-              " credential rules, authenticated with token; 5 served, 1 refused",
+              " credential rules, authenticated with token; 6 served, 1 refused",
           )
           # Requests are still served after the reload.
           machine.succeed("systemctl reload prometheus.service")
@@ -238,7 +285,7 @@ in
           t.assertEqual(machine.succeed("base64 -w0 /tmp/creds-scoped/binary").strip(), binary_b64)
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds-scoped/raw")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value", "b64": decoded_b64},
           )
           t.assertIn("deny", machine.succeed(f"bao token capabilities {scoped_token} kv/data/other"))
 
