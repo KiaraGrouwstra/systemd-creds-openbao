@@ -79,6 +79,15 @@ in
               path = "kv/data/systemd/creds-test";
               field = "data";
             }
+            # The same bytes as "binary", stored as base64 with no prefix
+            # to mark it: here the rule is what says the value is encoded.
+            {
+              unit = "creds-test.service";
+              credential = "plain";
+              path = "systemd/{unit_name}";
+              field = "plain_b64";
+              encoding = "base64";
+            }
             {
               unit = "creds-test.service";
               path = "systemd/{unit_name}";
@@ -123,6 +132,13 @@ in
       binary_secret = bytes(range(256))
       binary_b64 = base64.b64encode(binary_secret).decode()
 
+      # What the creds-test secret holds, as the json and raw rules serve it.
+      stored = {
+          "binary": f"base64:{binary_b64}",
+          "plain_b64": binary_b64,
+          "fallback": "fallback-value",
+      }
+
 
       def web_yml(password_hash):
           return f"basic_auth_users:\n  prom: {password_hash}"
@@ -160,7 +176,8 @@ in
           machine.succeed("bao secrets enable -version=2 kv")
           machine.succeed(f"bao kv put -mount=kv systemd/prometheus 'web.yml={web_yml(bcrypt('password1'))}'")
           machine.succeed(
-              f"bao kv put -mount=kv systemd/creds-test 'binary=base64:{binary_b64}' fallback=fallback-value"
+              f"bao kv put -mount=kv systemd/creds-test 'binary=base64:{binary_b64}' "
+              f"plain_b64={binary_b64} fallback=fallback-value"
           )
 
       with subtest("Prometheus starts with basic auth served from OpenBao"):
@@ -179,17 +196,19 @@ in
           machine.fail(f"curl --fail --silent -u prom:password1 {METRICS}")
 
       with subtest("Placeholders, base64, JSON format, raw backend"):
-          # Each of the three credentials is resolved by a different rule.
-          fetch_credentials("/tmp/creds", ["binary", "json", "raw"])
+          # Each of the four credentials is resolved by a different rule.
+          fetch_credentials("/tmp/creds", ["binary", "json", "raw", "plain"])
           t.assertEqual(machine.succeed("base64 -w0 /tmp/creds/binary").strip(), binary_b64)
+          # Prefix-marked and rule-declared base64 serve the same bytes.
+          t.assertEqual(machine.succeed("base64 -w0 /tmp/creds/plain").strip(), binary_b64)
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds/json")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              stored,
           )
           # The raw rule's "data" field is a map, so it is served JSON-encoded.
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds/raw")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              stored,
           )
 
       with subtest("Requests matching no rule are refused with an empty credential"):
@@ -209,11 +228,11 @@ in
           )
           machine.succeed("journalctl -u systemd-creds-openbao --grep 'configuration reloaded'")
           # The counters cover every request so far: prometheus's start and
-          # reload, the three creds-test fetches, and the denied request.
+          # reload, the four creds-test fetches, and the denied request.
           t.assertEqual(
               machine.succeed("systemctl show -p StatusText --value systemd-creds-openbao.service").strip(),
               "serving ${toString (builtins.length nodes.machine.services.systemd-creds-openbao.settings.credentials)}"
-              " credential rules, authenticated with token; 5 served, 1 refused",
+              " credential rules, authenticated with token; 6 served, 1 refused",
           )
           # Requests are still served after the reload.
           machine.succeed("systemctl reload prometheus.service")
@@ -238,7 +257,7 @@ in
           t.assertEqual(machine.succeed("base64 -w0 /tmp/creds-scoped/binary").strip(), binary_b64)
           t.assertEqual(
               json.loads(machine.succeed("cat /tmp/creds-scoped/raw")),
-              {"binary": f"base64:{binary_b64}", "fallback": "fallback-value"},
+              stored,
           )
           t.assertIn("deny", machine.succeed(f"bao token capabilities {scoped_token} kv/data/other"))
 
