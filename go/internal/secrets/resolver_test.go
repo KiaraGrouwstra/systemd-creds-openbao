@@ -236,6 +236,61 @@ path = "p"
 	}
 }
 
+func TestResolveBase64Encoding(t *testing.T) {
+	blob := []byte{0x00, 0x01, 0xff}
+	long := bytes.Repeat(blob, 40)
+	// Wrapped at a column, the way base64(1) writes it by default.
+	wrapped := base64.StdEncoding.EncodeToString(long)
+	wrapped = wrapped[:76] + "\n" + wrapped[76:]
+
+	r := newResolver(t, `
+[[credentials]]
+unit = "*"
+path = "p"
+encoding = "base64"
+`, &fakeReader{kv: map[string]map[string]any{
+		"kv/p": {
+			"blob":     base64.StdEncoding.EncodeToString(blob),
+			"wrapped":  wrapped,
+			"broken":   "!!!not-base64!!!",
+			"prefixed": "base64:" + base64.StdEncoding.EncodeToString(blob),
+			"number":   json.Number("5432"),
+		},
+	}})
+
+	// The value carries no marker of its own: the rule is what says it is
+	// base64.
+	got, _, err := r.Resolve(context.Background(), credserver.Request{Unit: "a.service", Credential: "blob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, blob) {
+		t.Errorf("got %v, want %v", got, blob)
+	}
+
+	got, _, err = r.Resolve(context.Background(), credserver.Request{Unit: "a.service", Credential: "wrapped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, long) {
+		t.Errorf("wrapped: got %v, want %v", got, long)
+	}
+
+	// A "base64:" prefix is part of the value here, so the value as a whole
+	// is not base64 and fails to decode: the two conventions do not stack.
+	for _, cred := range []string{"broken", "prefixed"} {
+		if _, _, err := r.Resolve(context.Background(), credserver.Request{Unit: "a.service", Credential: cred}); err == nil {
+			t.Errorf("%s: Resolve succeeded, want an error", cred)
+		}
+	}
+
+	// A non-string field has no base64 to decode; JSON-encoding it instead
+	// would serve the number as text and call it raw bytes.
+	if _, _, err := r.Resolve(context.Background(), credserver.Request{Unit: "a.service", Credential: "number"}); err == nil {
+		t.Error("Resolve succeeded for a non-string field, want an error")
+	}
+}
+
 func TestResolveRejectsUncleanExpandedPath(t *testing.T) {
 	r := newResolver(t, `
 [[credentials]]
@@ -267,4 +322,3 @@ path = "p"
 		t.Errorf("mount: err = %v, want unclean-path error", err)
 	}
 }
-

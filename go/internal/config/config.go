@@ -33,6 +33,12 @@ const (
 	FormatJSON  = "json"  // the whole secret data, JSON-encoded
 )
 
+// How a string field stores its value, for format = "field".
+const (
+	EncodingAuto   = ""       // verbatim, unless the value carries a "base64:" prefix
+	EncodingBase64 = "base64" // the whole value is base64
+)
+
 // Config is the root of the configuration file.
 type Config struct {
 	OpenBao     OpenBao      `toml:"openbao"`
@@ -205,6 +211,10 @@ type Credential struct {
 	// Field is the key of the secret data to serve when Format is "field".
 	// Default: "{credential}".
 	Field string `toml:"field"`
+	// Encoding is how the field stores its value: "" (default) serves a
+	// string verbatim and decodes only a "base64:" prefix, "base64" decodes
+	// the whole value. Only with Format "field".
+	Encoding string `toml:"encoding"`
 }
 
 // SecretRef names one secret to read. Package secrets builds it from a rule and
@@ -442,8 +452,19 @@ func (r *Credential) validate() error {
 		if r.Field != "" {
 			return fmt.Errorf("field must not be set with format = %q", FormatJSON)
 		}
+		// The whole secret data is served as it came, so there is no one
+		// value an encoding could describe.
+		if r.Encoding != EncodingAuto {
+			return fmt.Errorf("encoding must not be set with format = %q", FormatJSON)
+		}
 	default:
 		return fmt.Errorf("unknown format %q (expected %q or %q)", r.Format, FormatField, FormatJSON)
+	}
+
+	switch r.Encoding {
+	case EncodingAuto, EncodingBase64:
+	default:
+		return fmt.Errorf("unknown encoding %q (expected %q)", r.Encoding, EncodingBase64)
 	}
 	return nil
 }

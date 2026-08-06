@@ -125,6 +125,7 @@ first match wins; **requests matching no rule are refused**.
 | `path` | required | Secret path below the mount, or the full API path for `raw` |
 | `format` | `field` | `field` serves one field verbatim; `json` serves all data as JSON |
 | `field` | `{credential}` | Which field of the secret data to serve; must not be set with `format = "json"` |
+| `encoding` | unset | `base64` decodes the whole field value; must not be set with `format = "json"` |
 
 The `kv` backend only supports KV v2. A KV v1 mount can still be read through
 `backend = "raw"` with the full API path.
@@ -139,6 +140,23 @@ With `format = "field"`, a string prefixed with `base64:` is decoded and served
 as raw bytes, since JSON has no byte string and credentials may be binary, and
 any non-string field is served JSON-encoded. `format = "json"` serves the data
 map as it comes, `base64:` prefixes included.
+
+`encoding = "base64"` decodes the whole value instead, for a writer that stores
+base64 without a prefix to mark it -- a KV entry filled by `base64 < file`, or
+one a bao agent template already reads back with `base64Decode`. The rule has
+to say so because the value cannot: unprefixed base64 is indistinguishable from
+a secret that happens to look like base64. Line breaks are ignored, so a value
+wrapped at a column decodes too, and a field that is not a string is refused
+rather than served JSON-encoded.
+
+```toml
+[[credentials]]
+unit = "myapp.service"
+credential = "tls-key"
+path = "vars/myapp"
+field = "content"
+encoding = "base64"
+```
 
 `path`, `field`, and `mount` support placeholders, so one rule can cover a
 whole convention. For unit `foo@bar.service` requesting credential `credx`:

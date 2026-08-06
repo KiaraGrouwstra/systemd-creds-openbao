@@ -76,7 +76,7 @@ func (r *Resolver) Resolve(ctx context.Context, req credserver.Request) ([]byte,
 		// which looks like a real value; refuse like a missing field instead.
 		return nil, "", fmt.Errorf("secret %q field %q is null", location, field)
 	}
-	out, err := encodeField(value)
+	out, err := encodeField(value, rule.Encoding)
 	if err != nil {
 		return nil, "", err
 	}
@@ -100,22 +100,42 @@ func (r *Resolver) match(req credserver.Request) *config.Credential {
 // Strings are served verbatim, except that a "base64:" prefix decodes to raw
 // bytes, since JSON has no byte string and credentials may be binary. Any
 // other type is JSON-encoded.
-func encodeField(value any) ([]byte, error) {
+//
+// encoding = "base64" instead decodes the whole value, for a writer that
+// stores base64 without a prefix to mark it. It is the rule that says so,
+// because nothing in the value itself can: unprefixed base64 is
+// indistinguishable from a secret that happens to look like base64.
+func encodeField(value any, encoding string) ([]byte, error) {
 	switch v := value.(type) {
 	case string:
+		if encoding == config.EncodingBase64 {
+			return decodeBase64(v)
+		}
 		if enc, ok := strings.CutPrefix(v, "base64:"); ok {
-			data, err := base64.StdEncoding.DecodeString(enc)
-			if err != nil {
-				return nil, fmt.Errorf("decoding base64 secret value: %w", err)
-			}
-			return data, nil
+			return decodeBase64(enc)
 		}
 		return []byte(v), nil
 	default:
+		if encoding == config.EncodingBase64 {
+			// JSON-encoding it would serve the number or list as text,
+			// which is not the raw bytes the rule asked for.
+			return nil, fmt.Errorf("encoding %q needs a string field, got %T", config.EncodingBase64, value)
+		}
 		out, err := json.Marshal(v)
 		if err != nil {
 			return nil, fmt.Errorf("encoding field value: %w", err)
 		}
 		return out, nil
 	}
+}
+
+// decodeBase64 decodes a base64 secret value. encoding/base64 ignores line
+// breaks, so a value an encoder wrapped at a column (base64(1) does, by
+// default) decodes too.
+func decodeBase64(s string) ([]byte, error) {
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decoding base64 secret value: %w", err)
+	}
+	return data, nil
 }

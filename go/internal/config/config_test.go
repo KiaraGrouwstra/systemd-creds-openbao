@@ -214,6 +214,16 @@ func TestParseErrors(t *testing.T) {
 			want: "field must not be set",
 		},
 		{
+			name: "json format with encoding",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nformat = \"json\"\nencoding = \"base64\"",
+			want: "encoding must not be set",
+		},
+		{
+			name: "unknown encoding",
+			toml: "[[credentials]]\nunit = \"u.service\"\npath = \"p\"\nencoding = \"hex\"",
+			want: "unknown encoding",
+		},
+		{
 			name: "bad unit glob",
 			toml: "[[credentials]]\nunit = \"[oops\"\npath = \"p\"",
 			want: "invalid glob",
