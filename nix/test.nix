@@ -174,7 +174,14 @@ in
       with subtest("Store secrets"):
           # One secret per consumer unit, at the paths the rules expand to.
           machine.succeed("bao secrets enable -version=2 kv")
-          machine.succeed(f"bao kv put -mount=kv systemd/prometheus 'web.yml={web_yml(bcrypt('password1'))}'")
+          # `-version=2` creates the mount and then upgrades it from
+          # non-versioned to versioned data. The mount's request handler
+          # rejects writes for the duration of that swap with "Upgrading from
+          # non-versioned to versioned data", and it stays unavailable for a
+          # moment after logging `upgrading keys finished` -- so the first
+          # write has to wait the window out rather than assume it is over.
+          # Later writes need no such treatment; the mount has settled by then.
+          machine.wait_until_succeeds(f"bao kv put -mount=kv systemd/prometheus 'web.yml={web_yml(bcrypt('password1'))}'")
           machine.succeed(
               f"bao kv put -mount=kv systemd/creds-test 'binary=base64:{binary_b64}' "
               f"plain_b64={binary_b64} fallback=fallback-value"
